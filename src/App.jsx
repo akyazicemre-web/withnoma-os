@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { supabase } from "./lib/supabase.js";
+import { useWorkspace } from "./lib/workspace.js";
 
 // ─── DESIGN TOKENS ────────────────────────────────────────────────────────────
 const T = {
@@ -78,7 +79,7 @@ const futureDate = n => { const d = new Date(); d.setDate(d.getDate() + n); retu
 const TASK_STATUS = {
   todo:       { l: "À faire",    c: T.muted,  bg: "rgba(154,136,112,0.1)" },
   in_progress:{ l: "En cours",   c: T.blue,   bg: T.blueBg },
-  review:     { l: "Révision",   c: T.purple, bg: T.purpleBg },
+  blocked:    { l: "Bloqué",     c: T.red,    bg: T.redBg },
   done:       { l: "✓ Validé",   c: T.green,  bg: T.greenBg },
 };
 const TASK_PRIORITY = {
@@ -357,19 +358,67 @@ function getSuggestions(data) {
   return s.slice(0, 3);
 }
 
+const makeLeadForm = (team = []) => ({
+  name: "",
+  company: "",
+  contact: "",
+  value: "",
+  status: "new",
+  pilote_id: team[0]?.id || "",
+  next_date: "",
+  notes: "",
+});
+
+const makeProjectForm = () => ({
+  name: "",
+  deadline: "",
+  budget: "",
+  brief: "",
+});
+
+const makeTaskForm = (team = []) => ({
+  name: "",
+  status: "todo",
+  priority: "normal",
+  assignee_id: team[0]?.id || "",
+  deadline: "",
+});
+
+const makeDeliverableForm = () => ({
+  name: "",
+  status: "pending",
+  deadline: "",
+  file_url: "",
+  visible_client: false,
+});
+
 // ─── HOME SCREEN ─────────────────────────────────────────────────────────────
-function HomeScreen({ data, user, setNav, setData }) {
-  const alerts = getAlerts(data);
-  const urgentTasks = data.tasks.filter(t => (t.priority === "urgent" || isOverdue(t.deadline, t.status)) && t.status !== "done").slice(0, 4);
-  const activeProjects = data.projects.filter(p => p.status === "active");
-  const upcoming = [...data.tasks.filter(t => { const d = daysLeft(t.deadline); return d !== null && d >= 0 && d <= 7 && t.status !== "done"; }), ...data.calendar].sort((a, b) => new Date(a.deadline || a.date) - new Date(b.deadline || b.date)).slice(0, 4);
+function HomeScreen({ data, user, setNav, openProject }) {
+  const priorityRank = { urgent: 0, high: 1, normal: 2, low: 3 };
+  const urgentTasks = [...data.tasks]
+    .filter((task) => task.status !== "done")
+    .sort((left, right) => {
+      const leftLate = isOverdue(left.deadline, left.status) ? 0 : 1;
+      const rightLate = isOverdue(right.deadline, right.status) ? 0 : 1;
+      if (leftLate !== rightLate) return leftLate - rightLate;
+
+      const leftPriority = priorityRank[left.priority] ?? 99;
+      const rightPriority = priorityRank[right.priority] ?? 99;
+      if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+
+      const leftDate = left.deadline ? new Date(left.deadline).getTime() : Number.MAX_SAFE_INTEGER;
+      const rightDate = right.deadline ? new Date(right.deadline).getTime() : Number.MAX_SAFE_INTEGER;
+      return leftDate - rightDate;
+    })
+    .slice(0, 4);
+  const activeProjects = data.projects.filter((project) => project.status === "active").slice(0, 4);
+  const upcoming = data.calendar.slice(0, 4);
   const suggestions = getSuggestions(data);
   const hour = new Date().getHours();
-  const greeting = hour < 12 ? "Bonjour" : hour < 18 ? "Bonjour" : "Bonsoir";
+  const greeting = hour < 18 ? "Bonjour" : "Bonsoir";
 
   return (
     <div style={{ minHeight: "100vh", background: T.bg, paddingBottom: 100 }}>
-      {/* Header */}
       <div style={{ padding: "56px 20px 0", background: T.bg }}>
         <div className="a0" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 28 }}>
           <div>
@@ -380,7 +429,6 @@ function HomeScreen({ data, user, setNav, setData }) {
           <Avatar name={user.name} color={user.color || T.gold} size={40} />
         </div>
 
-        {/* DO NOW */}
         {urgentTasks.length > 0 && (
           <div className="a1" style={{ marginBottom: 24 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
@@ -388,23 +436,23 @@ function HomeScreen({ data, user, setNav, setData }) {
               <Mn v="À faire maintenant" s={{ fontSize: 10, color: T.red, textTransform: "uppercase", letterSpacing: "0.14em", fontWeight: 600 }} />
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {urgentTasks.map(t => {
-                const st = TASK_STATUS[t.status];
-                const pr = TASK_PRIORITY[t.priority];
-                const d = daysLeft(t.deadline);
-                const late = isOverdue(t.deadline, t.status);
+              {urgentTasks.map((task) => {
+                const priority = TASK_PRIORITY[task.priority];
+                const dayDelta = daysLeft(task.deadline);
+                const late = isOverdue(task.deadline, task.status);
+                const member = data.team.find((teamMember) => teamMember.id === task.assignee_id || teamMember.name === task.assignee);
                 return (
-                  <Card key={t.id} onClick={() => setNav("tasks")} style={{ padding: "14px 16px", borderLeft: `3px solid ${late ? T.red : T.gold}` }}>
+                  <Card key={task.id} onClick={() => openProject(task.project_id)} style={{ padding: "14px 16px", borderLeft: `3px solid ${late ? T.red : T.gold}` }}>
                     <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                       <Dot color={late ? T.red : T.gold} size={8} />
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</div>
-                        <div style={{ display: "flex", gap: 6, marginTop: 4, alignItems: "center" }}>
-                          <Badge label={pr.l} color={pr.c} bg={pr.bg} />
-                          {t.deadline && <Mn v={late ? `⚠ ${Math.abs(d)}j retard` : d === 0 ? "Aujourd'hui" : `J-${d}`} s={{ fontSize: 10, color: late ? T.red : T.muted }} />}
+                        <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{task.name}</div>
+                        <div style={{ display: "flex", gap: 6, marginTop: 4, alignItems: "center", flexWrap: "wrap" }}>
+                          <Badge label={priority.l} color={priority.c} bg={priority.bg} />
+                          {task.deadline && <Mn v={late ? `⚠ ${Math.abs(dayDelta)}j retard` : dayDelta === 0 ? "Aujourd'hui" : `J-${dayDelta}`} s={{ fontSize: 10, color: late ? T.red : T.muted }} />}
                         </div>
                       </div>
-                      <Avatar name={t.assignee} color={data.team.find(m => m.name === t.assignee)?.color || T.muted} size={24} />
+                      <Avatar name={task.assignee} color={member?.color || T.muted} size={24} />
                     </div>
                   </Card>
                 );
@@ -415,37 +463,35 @@ function HomeScreen({ data, user, setNav, setData }) {
       </div>
 
       <div style={{ padding: "0 20px" }}>
-        {/* Active Projects */}
         <div className="a2" style={{ marginBottom: 24 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <Mn v="Projets actifs" s={{ fontSize: 10, color: T.muted, textTransform: "uppercase", letterSpacing: "0.14em" }} />
             <button onClick={() => setNav("projects")} style={{ fontSize: 12, color: T.gold, fontWeight: 600 }}>Voir tout →</button>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {activeProjects.map(p => {
-              const client = data.clients.find(c => c.id === p.client_id);
-              const ph = PROJECT_PHASE[p.phase];
-              const rk = PROJECT_RISK[p.risk];
+            {activeProjects.map((project) => {
+              const phase = PROJECT_PHASE[project.phase];
+              const risk = PROJECT_RISK[project.risk];
               return (
-                <Card key={p.id} onClick={() => setNav("projects")} style={{ padding: "16px" }}>
+                <Card key={project.id} onClick={() => openProject(project.id)} style={{ padding: "16px" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
                     <div style={{ flex: 1, minWidth: 0, marginRight: 10 }}>
-                      <div style={{ fontSize: 14, fontWeight: 600, color: T.ink, marginBottom: 3 }}>{p.name}</div>
-                      {client && <div style={{ fontSize: 11, color: T.muted }}>{client.name}</div>}
+                      <div style={{ fontSize: 14, fontWeight: 600, color: T.ink, marginBottom: 3 }}>{project.name}</div>
+                      {project.client && <div style={{ fontSize: 11, color: T.muted }}>{project.client.name}</div>}
                     </div>
-                    <Badge label={rk.l} color={rk.c} bg={`${rk.c}15`} />
+                    <Badge label={risk.l} color={risk.c} bg={`${risk.c}15`} />
                   </div>
-                  <ProgressBar value={p.progress} color={rk.c === T.red ? T.red : T.gold} />
+                  <ProgressBar value={project.progress} color={risk.c === T.red ? T.red : T.gold} />
                   <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, alignItems: "center" }}>
                     <div style={{ fontSize: 11, color: T.muted, display: "flex", alignItems: "center", gap: 4 }}>
-                      <span style={{ color: ph.c, fontWeight: 600 }}>{ph.l}</span>
-                      {p.deadline && <span> · J-{daysLeft(p.deadline)}</span>}
+                      <span style={{ color: phase.c, fontWeight: 600 }}>{phase.l}</span>
+                      {project.deadline && <span> · J-{daysLeft(project.deadline)}</span>}
                     </div>
-                    <Mn v={`${p.progress}%`} s={{ fontSize: 11, color: T.gold, fontWeight: 600 }} />
+                    <Mn v={`${project.progress}%`} s={{ fontSize: 11, color: T.gold, fontWeight: 600 }} />
                   </div>
-                  {p.next_action && (
+                  {project.next_action && (
                     <div style={{ marginTop: 10, padding: "8px 10px", background: T.goldBg, borderRadius: T.rSm, fontSize: 11, color: T.gold, fontWeight: 500 }}>
-                      → {p.next_action}
+                      → {project.next_action}
                     </div>
                   )}
                 </Card>
@@ -454,19 +500,18 @@ function HomeScreen({ data, user, setNav, setData }) {
           </div>
         </div>
 
-        {/* Upcoming */}
         {upcoming.length > 0 && (
           <div className="a3" style={{ marginBottom: 24 }}>
             <Mn v="À venir cette semaine" s={{ fontSize: 10, color: T.muted, textTransform: "uppercase", letterSpacing: "0.14em", display: "block", marginBottom: 12 }} />
             <Card style={{ overflow: "hidden" }}>
-              {upcoming.map((item, i) => (
-                <div key={item.id} style={{ padding: "13px 16px", borderBottom: i < upcoming.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 12, alignItems: "center" }}>
+              {upcoming.map((item, index) => (
+                <div key={item.id} style={{ padding: "13px 16px", borderBottom: index < upcoming.length - 1 ? `1px solid ${T.border}` : "none", display: "flex", gap: 12, alignItems: "center" }}>
                   <div style={{ width: 36, height: 36, borderRadius: T.rSm, background: T.goldBg, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                    <Mn v={new Date(item.deadline || item.date).getDate()} s={{ fontSize: 14, fontWeight: 700, color: T.gold, lineHeight: 1 }} />
-                    <Mn v={new Date(item.deadline || item.date).toLocaleDateString("fr-FR", { month: "short" })} s={{ fontSize: 8, color: T.muted }} />
+                    <Mn v={new Date(item.date).getDate()} s={{ fontSize: 14, fontWeight: 700, color: T.gold, lineHeight: 1 }} />
+                    <Mn v={new Date(item.date).toLocaleDateString("fr-FR", { month: "short" })} s={{ fontSize: 8, color: T.muted }} />
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name || item.title}</div>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</div>
                     {item.time && <Mn v={item.time} s={{ fontSize: 10, color: T.muted }} />}
                   </div>
                 </div>
@@ -475,21 +520,20 @@ function HomeScreen({ data, user, setNav, setData }) {
           </div>
         )}
 
-        {/* Pipeline highlights */}
         <div className="a3" style={{ marginBottom: 24 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <Mn v="Pipeline" s={{ fontSize: 10, color: T.muted, textTransform: "uppercase", letterSpacing: "0.14em" }} />
             <button onClick={() => setNav("pipeline")} style={{ fontSize: 12, color: T.gold, fontWeight: 600 }}>Voir tout →</button>
           </div>
           <div style={{ display: "flex", gap: 8, overflow: "auto", paddingBottom: 4 }}>
-            {data.leads.filter(l => l.status !== "lost").slice(0, 4).map(l => {
-              const st = LEAD_STATUS[l.status];
+            {data.leads.filter((lead) => lead.status !== "lost").slice(0, 4).map((lead) => {
+              const status = LEAD_STATUS[lead.status];
               return (
-                <Card key={l.id} onClick={() => setNav("pipeline")} style={{ padding: "14px", minWidth: 160, flexShrink: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 4 }}>{l.name}</div>
-                  <Badge label={st.l} color={st.c} bg={`${st.c}15`} />
+                <Card key={lead.id} onClick={() => setNav("pipeline")} style={{ padding: "14px", minWidth: 160, flexShrink: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 4 }}>{lead.name}</div>
+                  <Badge label={status.l} color={status.c} bg={`${status.c}15`} />
                   <div style={{ marginTop: 8 }}>
-                    <Mn v={`${parseFloat(l.value).toLocaleString("fr-FR")} MAD`} s={{ fontSize: 12, color: T.gold, fontWeight: 600 }} />
+                    <Mn v={`${parseFloat(lead.value || 0).toLocaleString("fr-FR")} MAD`} s={{ fontSize: 12, color: T.gold, fontWeight: 600 }} />
                   </div>
                 </Card>
               );
@@ -497,17 +541,16 @@ function HomeScreen({ data, user, setNav, setData }) {
           </div>
         </div>
 
-        {/* Suggestions */}
         {suggestions.length > 0 && (
           <div className="a4">
             <Mn v="Suggestions" s={{ fontSize: 10, color: T.muted, textTransform: "uppercase", letterSpacing: "0.14em", display: "block", marginBottom: 12 }} />
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {suggestions.map((s, i) => (
-                <div key={i} style={{ display: "flex", gap: 10, padding: "12px 14px", background: T.bg2, borderRadius: T.r, border: `1px solid ${T.border}` }}>
-                  <span style={{ fontSize: 18 }}>{s.icon}</span>
+              {suggestions.map((suggestion, index) => (
+                <div key={index} style={{ display: "flex", gap: 10, padding: "12px 14px", background: T.bg2, borderRadius: T.r, border: `1px solid ${T.border}` }}>
+                  <span style={{ fontSize: 18 }}>{suggestion.icon}</span>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 12, color: T.ink2, marginBottom: 2 }}>{s.label}</div>
-                    <div style={{ fontSize: 11, color: T.gold, fontWeight: 600 }}>{s.action}</div>
+                    <div style={{ fontSize: 12, color: T.ink2, marginBottom: 2 }}>{suggestion.label}</div>
+                    <div style={{ fontSize: 11, color: T.gold, fontWeight: 600 }}>{suggestion.action}</div>
                   </div>
                 </div>
               ))}
@@ -520,25 +563,98 @@ function HomeScreen({ data, user, setNav, setData }) {
 }
 
 // ─── PIPELINE SCREEN ─────────────────────────────────────────────────────────
-function PipelineScreen({ data, setData }) {
+function PipelineScreen({ data, actions, openClient }) {
   const [modal, setModal] = useState(false);
   const [edit, setEdit] = useState(null);
-  const [form, setForm] = useState({ name: "", company: "", contact: "", value: "", status: "new", pilote: "Cemre", next_date: "", notes: "" });
+  const [form, setForm] = useState(makeLeadForm(data.team));
+  const [actionError, setActionError] = useState("");
+  const [saving, setSaving] = useState(false);
   const sf = (k, v) => setForm(p => ({ ...p, [k]: v }));
 
-  const save = () => {
-    if (!form.name.trim()) return;
-    const leads = edit
-      ? data.leads.map(l => l.id === edit.id ? { ...form, id: l.id } : l)
-      : [...data.leads, { ...form, id: uid() }];
-    setData(d => ({ ...d, leads }));
-    setModal(false); setEdit(null);
+  useEffect(() => {
+    if (!form.pilote_id && data.team.length > 0) {
+      setForm(current => ({ ...current, pilote_id: data.team[0].id }));
+    }
+  }, [data.team, form.pilote_id]);
+
+  const openCreate = () => {
+    setEdit(null);
+    setActionError("");
+    setForm(makeLeadForm(data.team));
+    setModal(true);
   };
 
-  const convertToClient = (lead) => {
-    const client = { id: uid(), name: lead.name, sector: lead.company, color: T.gold, status: "active", pilote: lead.pilote, contact: lead.contact, notes: lead.notes, since: today() };
-    const leads = data.leads.map(l => l.id === lead.id ? { ...l, status: "won" } : l);
-    setData(d => ({ ...d, clients: [...d.clients, client], leads }));
+  const openEdit = (lead) => {
+    setEdit(lead);
+    setActionError("");
+    setForm({
+      name: lead.name || "",
+      company: lead.company || "",
+      contact: lead.contact || "",
+      value: lead.value || "",
+      status: lead.status || "new",
+      pilote_id: lead.pilote_id || data.team[0]?.id || "",
+      next_date: lead.next_date || "",
+      notes: lead.notes || "",
+    });
+    setModal(true);
+  };
+
+  const save = async () => {
+    if (!form.name.trim()) {
+      setActionError("Le nom du lead est requis.");
+      return;
+    }
+
+    setSaving(true);
+    setActionError("");
+
+    try {
+      if (edit) {
+        await actions.updateLead(edit.id, form, edit.client_status || "prospect");
+      } else {
+        await actions.createLead(form);
+      }
+      setModal(false);
+      setEdit(null);
+    } catch (error) {
+      setActionError(error.message || "Impossible d'enregistrer le lead.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const convertToClient = async (lead) => {
+    setSaving(true);
+    setActionError("");
+
+    try {
+      await actions.convertLeadToClient(lead.id);
+      openClient(lead.id);
+    } catch (error) {
+      setActionError(error.message || "Impossible de convertir ce lead en client.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeLead = async () => {
+    if (!edit) {
+      return;
+    }
+
+    setSaving(true);
+    setActionError("");
+
+    try {
+      await actions.deleteLead(edit.id);
+      setModal(false);
+      setEdit(null);
+    } catch (error) {
+      setActionError(error.message || "Impossible de supprimer ce lead.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const totalValue = data.leads.filter(l => l.status !== "lost").reduce((s, l) => s + parseFloat(l.value || 0), 0);
@@ -551,9 +667,15 @@ function PipelineScreen({ data, setData }) {
           <Mn v="Commercial" s={{ fontSize: 10, color: T.gold, letterSpacing: "0.2em", display: "block", marginBottom: 6 }} />
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
             <Pl v="Pipeline" s={{ fontSize: 28, fontWeight: 600, color: T.ink }} />
-            <Btn label="+ Lead" sm onClick={() => { setEdit(null); setForm({ name: "", company: "", contact: "", value: "", status: "new", pilote: "Cemre", next_date: "", notes: "" }); setModal(true); }} />
+            <Btn label="+ Lead" sm onClick={openCreate} />
           </div>
         </div>
+
+        {actionError && (
+          <div className="a1" style={{ padding: "12px 14px", background: T.redBg, border: `1px solid ${T.red}22`, borderRadius: T.rSm, fontSize: 12, color: T.red, marginBottom: 16 }}>
+            {actionError}
+          </div>
+        )}
 
         {/* Stats */}
         <div className="a1" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 24 }}>
@@ -585,7 +707,7 @@ function PipelineScreen({ data, setData }) {
                 </div>
               ) : (
                 leads.map(l => (
-                  <Card key={l.id} onClick={() => { setEdit(l); setForm(l); setModal(true); }} style={{ padding: "16px", marginBottom: 8 }}>
+                  <Card key={l.id} onClick={() => openEdit(l)} style={{ padding: "16px", marginBottom: 8 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                       <div style={{ flex: 1 }}>
                         <div style={{ fontSize: 14, fontWeight: 600, color: T.ink, marginBottom: 2 }}>{l.name}</div>
@@ -595,11 +717,13 @@ function PipelineScreen({ data, setData }) {
                           {l.next_date && <Mn v={`RDV ${fDate(l.next_date)}`} s={{ fontSize: 10, color: T.muted }} />}
                         </div>
                       </div>
-                      <Avatar name={l.pilote} color={data.team.find(m => m.name === l.pilote)?.color || T.gold} size={28} />
+                      <Avatar name={l.pilote} color={data.team.find(m => m.id === l.pilote_id || m.name === l.pilote)?.color || T.gold} size={28} />
                     </div>
                     {l.status !== "won" && l.status !== "lost" && (
                       <div style={{ marginTop: 10, display: "flex", gap: 6 }}>
-                        <button onClick={e => { e.stopPropagation(); convertToClient(l); }} style={{ fontSize: 11, color: T.green, fontWeight: 600, background: T.greenBg, padding: "6px 12px", borderRadius: 20, border: `1px solid ${T.green}22` }}>→ Convertir en client</button>
+                        <button disabled={saving} onClick={e => { e.stopPropagation(); void convertToClient(l); }} style={{ fontSize: 11, color: T.green, fontWeight: 600, background: T.greenBg, padding: "6px 12px", borderRadius: 20, border: `1px solid ${T.green}22`, opacity: saving ? 0.5 : 1 }}>
+                          → Convertir en client
+                        </button>
                       </div>
                     )}
                   </Card>
@@ -612,20 +736,21 @@ function PipelineScreen({ data, setData }) {
 
       {modal && (
         <Modal title={edit ? "Modifier lead" : "Nouveau lead"} onClose={() => { setModal(false); setEdit(null); }}>
+          {actionError && <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>{actionError}</div>}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
             <Input label="Nom" value={form.name} onChange={e => sf("name", e.target.value)} placeholder="Dar Yacout" />
             <Input label="Entreprise" value={form.company} onChange={e => sf("company", e.target.value)} placeholder="Secteur" />
             <Input label="Contact" value={form.contact} onChange={e => sf("contact", e.target.value)} placeholder="Nom contact" />
             <Input label="Budget estimé (MAD)" value={form.value} onChange={e => sf("value", e.target.value)} placeholder="3000" />
             <Select label="Statut" value={form.status} onChange={e => sf("status", e.target.value)} options={Object.entries(LEAD_STATUS).map(([k, v]) => ({ value: k, label: v.l }))} />
-            <Select label="Pilote" value={form.pilote} onChange={e => sf("pilote", e.target.value)} options={["Cemre", "Ambrine"].map(n => ({ value: n, label: n }))} />
+            <Select label="Pilote" value={form.pilote_id} onChange={e => sf("pilote_id", e.target.value)} options={data.team.map(member => ({ value: member.id, label: member.name }))} />
           </div>
           <Input label="Prochain RDV" value={form.next_date} onChange={e => sf("next_date", e.target.value)} type="date" />
           <Input label="Notes" value={form.notes} onChange={e => sf("notes", e.target.value)} multiline placeholder="Contexte, source..." />
           <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-            {edit && <Btn label="Supprimer" v="danger" sm onClick={() => { setData(d => ({ ...d, leads: d.leads.filter(l => l.id !== edit.id) })); setModal(false); }} />}
+            {edit && <Btn label="Supprimer" v="danger" sm onClick={() => void removeLead()} disabled={saving} />}
             <Btn label="Annuler" v="ghost" sm onClick={() => { setModal(false); setEdit(null); }} />
-            <Btn label={edit ? "Enregistrer" : "Créer"} sm onClick={save} />
+            <Btn label={saving ? "En cours…" : edit ? "Enregistrer" : "Créer"} sm onClick={() => void save()} disabled={saving} />
           </div>
         </Modal>
       )}
@@ -634,19 +759,69 @@ function PipelineScreen({ data, setData }) {
 }
 
 // ─── CLIENTS SCREEN ──────────────────────────────────────────────────────────
-function ClientsScreen({ data, setData, user }) {
-  const [sel, setSel] = useState(null);
+function ClientsScreen({ data, actions, selectedClientId, onClientSelected, openProject }) {
+  const [sel, setSel] = useState(selectedClientId || null);
   const [tab, setTab] = useState("overview");
   const [vaultReveal, setVaultReveal] = useState({});
   const [modal, setModal] = useState(false);
+  const [projectForm, setProjectForm] = useState(makeProjectForm());
+  const [actionError, setActionError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const client = sel ? data.clients.find(c => c.id === sel) : null;
   const clientProjects = client ? data.projects.filter(p => p.client_id === client.id) : [];
   const clientFiles = client ? data.files.filter(f => f.client_id === client.id) : [];
   const clientVault = client ? data.vault.filter(v => v.client_id === client.id) : [];
+  const clientTasks = client ? data.tasks.filter(t => t.client_id === client.id && t.status !== "done") : [];
 
   const fileIcon = t => ({ document: "📄", template: "🎨", creative_asset: "✨", image: "🖼", video: "🎬", link: "🔗" })[t] || "📄";
   const platformIcon = p => ({ Instagram: "📸", Facebook: "👤", TikTok: "🎵", LinkedIn: "💼", Google_Business: "🗺", Tripadvisor: "⭐", email: "✉️", domain: "🌐", CMS: "⚙️", Snapchat: "👻", WhatsApp_Business: "💬" })[p] || "🔑";
+
+  useEffect(() => {
+    if (selectedClientId) {
+      setSel(selectedClientId);
+    }
+  }, [selectedClientId]);
+
+  const openClient = (clientId) => {
+    setSel(clientId);
+    onClientSelected?.(clientId);
+  };
+
+  const resetProjectModal = () => {
+    setProjectForm(makeProjectForm());
+    setActionError("");
+    setModal(true);
+  };
+
+  const openFile = (file) => {
+    if (file.file_url) {
+      window.open(file.file_url, "_blank", "noopener,noreferrer");
+    }
+  };
+
+  const saveProject = async () => {
+    if (!client || !projectForm.name.trim()) {
+      setActionError("Le nom du projet est requis.");
+      return;
+    }
+
+    setSaving(true);
+    setActionError("");
+
+    try {
+      const createdProject = await actions.createProject(client.id, projectForm);
+      setModal(false);
+      setProjectForm(makeProjectForm());
+      if (createdProject?.id) {
+        openProject(createdProject.id);
+      }
+    } catch (error) {
+      setActionError(error.message || "Impossible de créer ce projet.");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   if (client) {
     const tabs = ["overview", "projects", "files", "vault", "notes"];
@@ -656,7 +831,7 @@ function ClientsScreen({ data, setData, user }) {
         {/* Header */}
         <div style={{ padding: "56px 20px 0", background: T.card, borderBottom: `1px solid ${T.border}` }}>
           <div className="a0" style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
-            <button onClick={() => { setSel(null); setTab("overview"); }} style={{ color: T.muted, fontSize: 20, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center" }}>←</button>
+            <button onClick={() => { setSel(null); onClientSelected?.(null); setTab("overview"); }} style={{ color: T.muted, fontSize: 20, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center" }}>←</button>
             <div style={{ width: 44, height: 44, borderRadius: T.r, background: `${client.color}18`, border: `1.5px solid ${client.color}33`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>{client.name[0]}</div>
             <div style={{ flex: 1 }}>
               <Pl v={client.name} s={{ fontSize: 18, fontWeight: 600, color: T.ink, display: "block" }} />
@@ -671,6 +846,11 @@ function ClientsScreen({ data, setData, user }) {
         </div>
 
         <div style={{ padding: "20px 20px 0" }}>
+          {actionError && (
+            <div className="fi" style={{ padding: "12px 14px", background: T.redBg, border: `1px solid ${T.red}22`, borderRadius: T.rSm, fontSize: 12, color: T.red, marginBottom: 14 }}>
+              {actionError}
+            </div>
+          )}
           {tab === "overview" && (
             <div className="fi">
               <Card style={{ padding: "20px", marginBottom: 14 }}>
@@ -694,8 +874,8 @@ function ClientsScreen({ data, setData, user }) {
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 14 }}>
                 {[
                   { l: "Projets", v: clientProjects.length, c: T.gold },
-                  { l: "Fichiers", v: clientFiles.length, c: T.blue },
-                  { l: "Accès", v: clientVault.length, c: T.purple },
+                  { l: "Tâches", v: clientTasks.length, c: T.blue },
+                  { l: "Fichiers", v: clientFiles.length, c: T.purple },
                 ].map(k => (
                   <Card key={k.l} style={{ padding: "14px", textAlign: "center" }}>
                     <Pl v={k.v} s={{ fontSize: 24, fontWeight: 600, color: k.c, display: "block" }} />
@@ -703,16 +883,34 @@ function ClientsScreen({ data, setData, user }) {
                   </Card>
                 ))}
               </div>
+
+              {clientTasks.length > 0 && (
+                <Card style={{ padding: "18px" }}>
+                  <Mn v="Tâches en cours" s={{ fontSize: 10, color: T.muted, textTransform: "uppercase", letterSpacing: "0.12em", display: "block", marginBottom: 12 }} />
+                  {clientTasks.slice(0, 4).map(task => (
+                    <div key={task.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{task.name}</div>
+                        <Mn v={task.assignee || "Non assigné"} s={{ fontSize: 10, color: T.muted }} />
+                      </div>
+                      {task.deadline && <Mn v={fDate(task.deadline)} s={{ fontSize: 10, color: T.gold }} />}
+                    </div>
+                  ))}
+                </Card>
+              )}
             </div>
           )}
 
           {tab === "projects" && (
             <div className="fi">
-              {clientProjects.length === 0 ? <EmptyState icon="📁" title="Aucun projet" sub="Ce client n'a pas encore de projet." action={<Btn label="+ Créer un projet" sm onClick={() => {}} />} /> : (
+              <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+                <Btn label="+ Projet" sm onClick={resetProjectModal} />
+              </div>
+              {clientProjects.length === 0 ? <EmptyState icon="📁" title="Aucun projet" sub="Ce client n'a pas encore de projet." action={<Btn label="+ Créer un projet" sm onClick={resetProjectModal} />} /> : (
                 clientProjects.map(p => {
                   const ph = PROJECT_PHASE[p.phase]; const rk = PROJECT_RISK[p.risk];
                   return (
-                    <Card key={p.id} style={{ padding: "16px", marginBottom: 10 }}>
+                    <Card key={p.id} onClick={() => openProject(p.id)} style={{ padding: "16px", marginBottom: 10 }}>
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
                         <Pl v={p.name} s={{ fontSize: 15, fontWeight: 600, color: T.ink }} />
                         <Badge label={rk.l} color={rk.c} bg={`${rk.c}15`} />
@@ -734,13 +932,13 @@ function ClientsScreen({ data, setData, user }) {
             <div className="fi">
               {clientFiles.length === 0 ? <EmptyState icon="📎" title="Aucun fichier" sub="Aucun fichier partagé pour ce client." /> : (
                 clientFiles.map(f => (
-                  <Card key={f.id} style={{ padding: "14px", marginBottom: 10, display: "flex", gap: 12, alignItems: "center" }}>
+                  <Card key={f.id} onClick={() => openFile(f)} style={{ padding: "14px", marginBottom: 10, display: "flex", gap: 12, alignItems: "center" }}>
                     <div style={{ width: 40, height: 40, borderRadius: T.rSm, background: T.goldBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>{fileIcon(f.type)}</div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</div>
                       <Mn v={`${f.size} · ${fDate(f.date)}`} s={{ fontSize: 10, color: T.muted }} />
                     </div>
-                    <button style={{ fontSize: 16, color: T.gold }}>↓</button>
+                    <button onClick={(event) => { event.stopPropagation(); openFile(f); }} disabled={!f.file_url} style={{ fontSize: 16, color: T.gold, opacity: f.file_url ? 1 : 0.35 }}>↓</button>
                   </Card>
                 ))
               )}
@@ -795,6 +993,21 @@ function ClientsScreen({ data, setData, user }) {
               </Card>
             </div>
           )}
+          {modal && (
+            <Modal title="Nouveau projet" subtitle={`Client · ${client.name}`} onClose={() => setModal(false)}>
+              {actionError && <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>{actionError}</div>}
+              <Input label="Nom du projet" value={projectForm.name} onChange={(event) => setProjectForm(current => ({ ...current, name: event.target.value }))} placeholder="Social Media Avril" />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+                <Input label="Échéance" value={projectForm.deadline} onChange={(event) => setProjectForm(current => ({ ...current, deadline: event.target.value }))} type="date" />
+                <Input label="Budget (MAD)" value={projectForm.budget} onChange={(event) => setProjectForm(current => ({ ...current, budget: event.target.value }))} placeholder="4500" />
+              </div>
+              <Input label="Brief" value={projectForm.brief} onChange={(event) => setProjectForm(current => ({ ...current, brief: event.target.value }))} multiline placeholder="Objectif, livrables, contexte client…" />
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <Btn label="Annuler" v="ghost" sm onClick={() => setModal(false)} />
+                <Btn label={saving ? "Création…" : "Créer le projet"} sm onClick={() => void saveProject()} disabled={saving} />
+              </div>
+            </Modal>
+          )}
         </div>
       </div>
     );
@@ -807,56 +1020,155 @@ function ClientsScreen({ data, setData, user }) {
           <Mn v="Gestion" s={{ fontSize: 10, color: T.gold, letterSpacing: "0.2em", display: "block", marginBottom: 6 }} />
           <Pl v="Clients" s={{ fontSize: 28, fontWeight: 600, color: T.ink }} />
         </div>
-        <div className="a1" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {data.clients.map(c => {
-            const projects = data.projects.filter(p => p.client_id === c.id && p.status === "active");
-            const tasks = data.tasks.filter(t => t.client_id === c.id && t.status !== "done");
-            return (
-              <Card key={c.id} onClick={() => setSel(c.id)} style={{ padding: "18px" }}>
-                <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
-                  <div style={{ width: 46, height: 46, borderRadius: T.r, background: `${c.color}18`, border: `1.5px solid ${c.color}33`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>{c.name[0]}</div>
-                  <div style={{ flex: 1 }}>
-                    <Pl v={c.name} s={{ fontSize: 16, fontWeight: 600, color: T.ink, display: "block", marginBottom: 2 }} />
-                    <div style={{ fontSize: 12, color: T.muted, marginBottom: 10 }}>{c.sector}</div>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <Badge label={`${projects.length} projet${projects.length > 1 ? "s" : ""}`} color={T.gold} bg={T.goldBg} />
-                      {tasks.length > 0 && <Badge label={`${tasks.length} tâche${tasks.length > 1 ? "s" : ""}`} color={T.blue} bg={T.blueBg} />}
+        {data.clients.length === 0 ? (
+          <EmptyState icon="◉" title="Aucun client actif" sub="Convertissez un lead pour créer votre premier client." />
+        ) : (
+          <div className="a1" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {data.clients.map(c => {
+              const projects = data.projects.filter(p => p.client_id === c.id && p.status === "active");
+              const tasks = data.tasks.filter(t => t.client_id === c.id && t.status !== "done");
+              return (
+                <Card key={c.id} onClick={() => openClient(c.id)} style={{ padding: "18px" }}>
+                  <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+                    <div style={{ width: 46, height: 46, borderRadius: T.r, background: `${c.color}18`, border: `1.5px solid ${c.color}33`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>{c.name[0]}</div>
+                    <div style={{ flex: 1 }}>
+                      <Pl v={c.name} s={{ fontSize: 16, fontWeight: 600, color: T.ink, display: "block", marginBottom: 2 }} />
+                      <div style={{ fontSize: 12, color: T.muted, marginBottom: 10 }}>{c.sector}</div>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <Badge label={`${projects.length} projet${projects.length > 1 ? "s" : ""}`} color={T.gold} bg={T.goldBg} />
+                        {tasks.length > 0 && <Badge label={`${tasks.length} tâche${tasks.length > 1 ? "s" : ""}`} color={T.blue} bg={T.blueBg} />}
+                      </div>
                     </div>
+                    <span style={{ fontSize: 16, color: T.muted }}>›</span>
                   </div>
-                  <span style={{ fontSize: 16, color: T.muted }}>›</span>
-                </div>
-              </Card>
-            );
-          })}
-        </div>
+                </Card>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
 // ─── PROJECTS SCREEN ─────────────────────────────────────────────────────────
-function ProjectsScreen({ data, setData, user }) {
-  const [sel, setSel] = useState(null);
+function ProjectsScreen({ data, actions, selectedProjectId, onProjectSelected }) {
+  const [sel, setSel] = useState(selectedProjectId || null);
   const [tab, setTab] = useState("tasks");
   const [taskModal, setTaskModal] = useState(false);
   const [editTask, setEditTask] = useState(null);
-  const [tf, setTf] = useState({ name: "", status: "todo", priority: "normal", assignee: "Sara", deadline: "", notes: "" });
+  const [deliverableModal, setDeliverableModal] = useState(false);
+  const [tf, setTf] = useState(makeTaskForm(data.team));
+  const [deliverableForm, setDeliverableForm] = useState(makeDeliverableForm());
+  const [actionError, setActionError] = useState("");
+  const [saving, setSaving] = useState(false);
   const stf = (k, v) => setTf(p => ({ ...p, [k]: v }));
+  const sdf = (k, v) => setDeliverableForm(p => ({ ...p, [k]: v }));
 
   const project = sel ? data.projects.find(p => p.id === sel) : null;
 
-  const saveTask = () => {
-    if (!tf.name.trim()) return;
-    const tasks = editTask
-      ? data.tasks.map(t => t.id === editTask.id ? { ...tf, id: t.id, project_id: sel, client_id: project.client_id } : t)
-      : [...data.tasks, { ...tf, id: uid(), project_id: sel, client_id: project.client_id }];
-    setData(d => ({ ...d, tasks }));
-    setTaskModal(false); setEditTask(null);
+  useEffect(() => {
+    if (selectedProjectId) {
+      setSel(selectedProjectId);
+      setTab("tasks");
+    }
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!tf.assignee_id && data.team.length > 0) {
+      setTf(current => ({ ...current, assignee_id: data.team[0].id }));
+    }
+  }, [data.team, tf.assignee_id]);
+
+  const openTaskEditor = (task = null) => {
+    setActionError("");
+    setEditTask(task);
+    setTf(task ? {
+      name: task.name || "",
+      status: task.status || "todo",
+      priority: task.priority || "normal",
+      assignee_id: task.assignee_id || data.team[0]?.id || "",
+      deadline: task.deadline || "",
+    } : makeTaskForm(data.team));
+    setTaskModal(true);
   };
 
-  const cycleStatus = (taskId) => {
-    const order = Object.keys(TASK_STATUS);
-    setData(d => ({ ...d, tasks: d.tasks.map(t => t.id === taskId ? { ...t, status: order[(order.indexOf(t.status) + 1) % order.length] } : t) }));
+  const saveTask = async () => {
+    if (!project || !tf.name.trim()) {
+      setActionError("Le nom de la tâche est requis.");
+      return;
+    }
+
+    setSaving(true);
+    setActionError("");
+
+    try {
+      await actions.saveTask(project.id, project.client_id, tf, editTask?.id || null);
+      setTaskModal(false);
+      setEditTask(null);
+    } catch (error) {
+      setActionError(error.message || "Impossible d'enregistrer la tâche.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeTask = async () => {
+    if (!editTask || !project) {
+      return;
+    }
+
+    setSaving(true);
+    setActionError("");
+
+    try {
+      await actions.deleteTask(editTask.id, project.id);
+      setTaskModal(false);
+      setEditTask(null);
+    } catch (error) {
+      setActionError(error.message || "Impossible de supprimer cette tâche.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const cycleStatus = async (task) => {
+    setSaving(true);
+    setActionError("");
+
+    try {
+      await actions.cycleTaskStatus(task);
+    } catch (error) {
+      setActionError(error.message || "Impossible de mettre à jour le statut.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveDeliverable = async () => {
+    if (!project || !deliverableForm.name.trim()) {
+      setActionError("Le nom du livrable est requis.");
+      return;
+    }
+
+    setSaving(true);
+    setActionError("");
+
+    try {
+      await actions.saveDeliverable(project.id, project.client_id, deliverableForm);
+      setDeliverableModal(false);
+      setDeliverableForm(makeDeliverableForm());
+    } catch (error) {
+      setActionError(error.message || "Impossible d'ajouter ce livrable.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const openFile = (file) => {
+    if (file.file_url) {
+      window.open(file.file_url, "_blank", "noopener,noreferrer");
+    }
   };
 
   if (project) {
@@ -871,7 +1183,7 @@ function ProjectsScreen({ data, setData, user }) {
       <div style={{ minHeight: "100vh", background: T.bg, paddingBottom: 100 }}>
         <div style={{ padding: "56px 20px 0", background: T.card, borderBottom: `1px solid ${T.border}` }}>
           <div className="a0" style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 16 }}>
-            <button onClick={() => { setSel(null); setTab("tasks"); }} style={{ color: T.muted, fontSize: 20, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center" }}>←</button>
+            <button onClick={() => { setSel(null); onProjectSelected?.(null); setTab("tasks"); }} style={{ color: T.muted, fontSize: 20, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center" }}>←</button>
             <div style={{ flex: 1 }}>
               <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 3 }}>
                 <Pl v={project.name} s={{ fontSize: 18, fontWeight: 600, color: T.ink }} />
@@ -900,10 +1212,15 @@ function ProjectsScreen({ data, setData, user }) {
         </div>
 
         <div style={{ padding: "16px 20px 0" }}>
+          {actionError && (
+            <div className="fi" style={{ padding: "12px 14px", background: T.redBg, border: `1px solid ${T.red}22`, borderRadius: T.rSm, fontSize: 12, color: T.red, marginBottom: 12 }}>
+              {actionError}
+            </div>
+          )}
           {tab === "tasks" && (
             <div className="fi">
               <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
-                <Btn label="+ Tâche" sm onClick={() => { setEditTask(null); setTf({ name: "", status: "todo", priority: "normal", assignee: "Sara", deadline: "", notes: "" }); setTaskModal(true); }} />
+                <Btn label="+ Tâche" sm onClick={() => openTaskEditor()} />
               </div>
               {pTasks.length === 0 ? <EmptyState icon="✓" title="Aucune tâche" sub="Créez la première tâche de ce projet." /> : (
                 pTasks.map(t => {
@@ -911,7 +1228,7 @@ function ProjectsScreen({ data, setData, user }) {
                   const d = daysLeft(t.deadline); const late = isOverdue(t.deadline, t.status);
                   return (
                     <div key={t.id} style={{ display: "flex", gap: 10, padding: "13px 0", borderBottom: `1px solid ${T.border}`, alignItems: "center" }}>
-                      <button onClick={() => cycleStatus(t.id)} style={{ width: 22, height: 22, borderRadius: "50%", border: `2px solid ${st.c}`, background: t.status === "done" ? st.c : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: "#fff", fontSize: 11 }}>
+                      <button onClick={() => void cycleStatus(t)} style={{ width: 22, height: 22, borderRadius: "50%", border: `2px solid ${st.c}`, background: t.status === "done" ? st.c : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: "#fff", fontSize: 11 }}>
                         {t.status === "done" ? "✓" : ""}
                       </button>
                       <div style={{ flex: 1, minWidth: 0 }}>
@@ -923,8 +1240,8 @@ function ProjectsScreen({ data, setData, user }) {
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-                        <Avatar name={t.assignee} color={data.team.find(m => m.name === t.assignee)?.color || T.muted} size={22} />
-                        <button onClick={() => { setEditTask(t); setTf(t); setTaskModal(true); }} style={{ color: T.muted, fontSize: 14, width: 22, height: 22 }}>✎</button>
+                        <Avatar name={t.assignee} color={data.team.find(m => m.id === t.assignee_id || m.name === t.assignee)?.color || T.muted} size={22} />
+                        <button onClick={() => openTaskEditor(t)} style={{ color: T.muted, fontSize: 14, width: 22, height: 22 }}>✎</button>
                       </div>
                     </div>
                   );
@@ -935,6 +1252,9 @@ function ProjectsScreen({ data, setData, user }) {
 
           {tab === "deliverables" && (
             <div className="fi">
+              <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+                <Btn label="+ Livrable" sm onClick={() => { setActionError(""); setDeliverableForm(makeDeliverableForm()); setDeliverableModal(true); }} />
+              </div>
               {pDelivs.length === 0 ? <EmptyState icon="📦" title="Aucun livrable" sub="Aucun livrable défini pour ce projet." /> : (
                 pDelivs.map(d => {
                   const st = DELIV_STATUS[d.status];
@@ -963,7 +1283,7 @@ function ProjectsScreen({ data, setData, user }) {
             <div className="fi">
               {pFiles.length === 0 ? <EmptyState icon="📎" title="Aucun fichier" sub="Aucun fichier pour ce projet." /> : (
                 pFiles.map(f => (
-                  <Card key={f.id} style={{ padding: "14px", marginBottom: 10, display: "flex", gap: 12, alignItems: "center" }}>
+                  <Card key={f.id} onClick={() => openFile(f)} style={{ padding: "14px", marginBottom: 10, display: "flex", gap: 12, alignItems: "center" }}>
                     <div style={{ width: 40, height: 40, borderRadius: T.rSm, background: T.goldBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>
                       {{ document: "📄", template: "🎨", creative_asset: "✨" }[f.type] || "📄"}
                     </div>
@@ -971,6 +1291,7 @@ function ProjectsScreen({ data, setData, user }) {
                       <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</div>
                       <Mn v={`${f.size} · ${fDate(f.date)}`} s={{ fontSize: 10, color: T.muted }} />
                     </div>
+                    <button onClick={(event) => { event.stopPropagation(); openFile(f); }} disabled={!f.file_url} style={{ fontSize: 16, color: T.gold, opacity: f.file_url ? 1 : 0.35 }}>↓</button>
                   </Card>
                 ))
               )}
@@ -980,18 +1301,38 @@ function ProjectsScreen({ data, setData, user }) {
 
         {taskModal && (
           <Modal title={editTask ? "Modifier tâche" : "Nouvelle tâche"} onClose={() => { setTaskModal(false); setEditTask(null); }}>
+            {actionError && <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>{actionError}</div>}
             <Input label="Nom" value={tf.name} onChange={e => stf("name", e.target.value)} placeholder="Nom de la tâche" />
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
               <Select label="Statut" value={tf.status} onChange={e => stf("status", e.target.value)} options={Object.entries(TASK_STATUS).map(([k, v]) => ({ value: k, label: v.l }))} />
               <Select label="Priorité" value={tf.priority} onChange={e => stf("priority", e.target.value)} options={Object.entries(TASK_PRIORITY).map(([k, v]) => ({ value: k, label: v.l }))} />
-              <Select label="Assigné" value={tf.assignee} onChange={e => stf("assignee", e.target.value)} options={data.team.map(m => ({ value: m.name, label: m.name }))} />
+              <Select label="Assigné" value={tf.assignee_id} onChange={e => stf("assignee_id", e.target.value)} options={data.team.map(m => ({ value: m.id, label: m.name }))} />
               <Input label="Deadline" value={tf.deadline} onChange={e => stf("deadline", e.target.value)} type="date" />
             </div>
-            <Input label="Notes" value={tf.notes} onChange={e => stf("notes", e.target.value)} multiline placeholder="Contexte..." />
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-              {editTask && <Btn label="Supprimer" v="danger" sm onClick={() => { setData(d => ({ ...d, tasks: d.tasks.filter(t => t.id !== editTask.id) })); setTaskModal(false); }} />}
+              {editTask && <Btn label="Supprimer" v="danger" sm onClick={() => void removeTask()} disabled={saving} />}
               <Btn label="Annuler" v="ghost" sm onClick={() => { setTaskModal(false); setEditTask(null); }} />
-              <Btn label={editTask ? "Enregistrer" : "Créer"} sm onClick={saveTask} />
+              <Btn label={saving ? "En cours…" : editTask ? "Enregistrer" : "Créer"} sm onClick={() => void saveTask()} disabled={saving} />
+            </div>
+          </Modal>
+        )}
+
+        {deliverableModal && (
+          <Modal title="Nouveau livrable" subtitle={project.name} onClose={() => setDeliverableModal(false)}>
+            {actionError && <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>{actionError}</div>}
+            <Input label="Nom" value={deliverableForm.name} onChange={e => sdf("name", e.target.value)} placeholder="Rapport mensuel Avril" />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+              <Select label="Statut" value={deliverableForm.status} onChange={e => sdf("status", e.target.value)} options={Object.entries(DELIV_STATUS).map(([key, current]) => ({ value: key, label: current.l }))} />
+              <Input label="Échéance" value={deliverableForm.deadline} onChange={e => sdf("deadline", e.target.value)} type="date" />
+            </div>
+            <Input label="Lien du fichier" value={deliverableForm.file_url} onChange={e => sdf("file_url", e.target.value)} placeholder="https://…" />
+            <label style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18, fontSize: 13, color: T.ink2 }}>
+              <input type="checkbox" checked={deliverableForm.visible_client} onChange={e => sdf("visible_client", e.target.checked)} />
+              Visible dans l'espace client
+            </label>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <Btn label="Annuler" v="ghost" sm onClick={() => setDeliverableModal(false)} />
+              <Btn label={saving ? "En cours…" : "Ajouter le livrable"} sm onClick={() => void saveDeliverable()} disabled={saving} />
             </div>
           </Modal>
         )}
@@ -1018,7 +1359,7 @@ function ProjectsScreen({ data, setData, user }) {
                 const tasks = data.tasks.filter(t => t.project_id === p.id);
                 const done = tasks.filter(t => t.status === "done").length;
                 return (
-                  <Card key={p.id} onClick={() => setSel(p.id)} style={{ padding: "18px", marginBottom: 10 }}>
+                  <Card key={p.id} onClick={() => { setSel(p.id); onProjectSelected?.(p.id); }} style={{ padding: "18px", marginBottom: 10 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
                       <div style={{ flex: 1, marginRight: 10 }}>
                         <Pl v={p.name} s={{ fontSize: 15, fontWeight: 600, color: T.ink, display: "block", marginBottom: 3 }} />
@@ -1041,6 +1382,9 @@ function ProjectsScreen({ data, setData, user }) {
             </div>
           );
         })}
+        {data.projects.filter(p => p.status === "active").length === 0 && (
+          <EmptyState icon="◇" title="Aucun projet actif" sub="Créez un projet depuis une fiche client pour démarrer le flux." />
+        )}
       </div>
     </div>
   );
@@ -1057,10 +1401,7 @@ function CalendarScreen({ data }) {
   });
   const fmt = d => d.toISOString().split("T")[0];
   const isToday = d => fmt(d) === fmt(now);
-  const allEvents = [
-    ...data.calendar.map(e => ({ ...e, kind: "event", date: e.date })),
-    ...data.tasks.filter(t => t.deadline && t.status !== "done").map(t => ({ ...t, kind: "task", date: t.deadline, title: t.name })),
-  ];
+  const allEvents = data.calendar.map(e => ({ ...e, kind: "event", date: e.date }));
   const typeColor = { rdv: T.gold, production: T.purple, internal: T.green, deadline: T.red, event: T.blue };
 
   return (
@@ -1131,7 +1472,7 @@ function CalendarScreen({ data }) {
 // ─── INBOX SCREEN ─────────────────────────────────────────────────────────────
 function InboxScreen({ data }) {
   const activities = [
-    ...data.tasks.filter(t => t.status === "review").map(t => ({ type: "review", icon: "👁", label: `"${t.name}" en révision`, sub: `Assigné à ${t.assignee}`, date: t.deadline, c: T.purple })),
+    ...data.tasks.filter(t => t.status === "blocked").map(t => ({ type: "blocked", icon: "⛔", label: `"${t.name}" bloquée`, sub: `Action requise pour ${t.assignee || "l'équipe"}`, date: t.deadline, c: T.red })),
     ...data.deliverables.filter(d => d.status === "delivered").map(d => ({ type: "delivered", icon: "📬", label: `"${d.name}" livré`, sub: "En attente de validation", date: d.deadline, c: T.gold })),
     ...data.tasks.filter(t => isOverdue(t.deadline, t.status)).map(t => ({ type: "overdue", icon: "⚠️", label: `"${t.name}" en retard`, sub: `${Math.abs(daysLeft(t.deadline))}j de retard`, date: t.deadline, c: T.red })),
   ].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
@@ -1201,20 +1542,32 @@ const C_NAV = [
   { id: "messages", icon: "✉", label: "Messages" },
 ];
 
-function ClientPortal({ session, clientId }) {
+function ClientPortal({ session, clientId, data }) {
   const [nav, setNav] = useState("home");
-  const [msgs, setMsgs] = useState([
-    { id: "m1", from: "Cemre", text: "Bonjour ! Le calendrier d'Avril est prêt pour validation.", time: "10:24", isTeam: true },
-    { id: "m2", from: "Vous",  text: "Parfait ! On peut rajouter une date événement le 15 ?",    time: "11:02", isTeam: false },
-    { id: "m3", from: "Ambrine",text: "Bien sûr, version mise à jour dans la journée.",           time: "11:15", isTeam: true },
-  ]);
+  const [msgs, setMsgs] = useState([]);
   const [txt, setTxt] = useState("");
   const ref = useRef(null);
   useEffect(() => { ref.current?.scrollTo(0, ref.current.scrollHeight); }, [msgs]);
 
-  const client = DEMO.clients.find(c => c.id === clientId) || DEMO.clients[0];
-  const projects = DEMO.projects.filter(p => p.client_id === client.id);
-  const files = DEMO.files.filter(f => f.client_id === client.id);
+  const client = data.clients.find(c => c.id === clientId) || data.clients[0];
+  const projects = client ? data.projects.filter(p => p.client_id === client.id) : [];
+  const files = client ? data.files.filter(f => f.client_id === client.id) : [];
+  const openFile = (file) => {
+    if (file.file_url) {
+      window.open(file.file_url, "_blank", "noopener,noreferrer");
+    }
+  };
+
+  if (!client) {
+    return (
+      <div style={{ maxWidth: 430, margin: "0 auto", minHeight: "100vh", background: T.bg, position: "relative" }}>
+        <style>{CSS}</style>
+        <div style={{ paddingTop: 120 }}>
+          <EmptyState icon="◉" title="Aucun espace client" sub="Aucun client n'est lié à ce compte pour le moment." />
+        </div>
+      </div>
+    );
+  }
 
   const send = () => {
     if (!txt.trim()) return;
@@ -1246,9 +1599,9 @@ function ClientPortal({ session, clientId }) {
                   )}
                   <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
                     {[
-                      { l: "Tâches", v: DEMO.tasks.filter(t => t.project_id === p.id).length },
-                      { l: "Livrables", v: DEMO.deliverables.filter(d => d.project_id === p.id && d.status === "validated").length },
-                      { l: "Fichiers", v: DEMO.files.filter(f => f.project_id === p.id).length },
+                      { l: "Tâches", v: data.tasks.filter(t => t.project_id === p.id).length },
+                      { l: "Livrables", v: data.deliverables.filter(d => d.project_id === p.id && d.status === "validated").length },
+                      { l: "Fichiers", v: data.files.filter(f => f.project_id === p.id).length },
                     ].map(k => (
                       <div key={k.l} style={{ textAlign: "center", background: T.bg, borderRadius: T.rSm, padding: "10px 6px" }}>
                         <Pl v={k.v} s={{ fontSize: 20, fontWeight: 600, color: T.gold, display: "block" }} />
@@ -1278,8 +1631,8 @@ function ClientPortal({ session, clientId }) {
             <Pl v="Livrables & Tâches" s={{ fontSize: 24, fontWeight: 600, color: T.ink }} />
           </div>
           {projects.map(p => {
-            const tasks = DEMO.tasks.filter(t => t.project_id === p.id);
-            const delivs = DEMO.deliverables.filter(d => d.project_id === p.id);
+            const tasks = data.tasks.filter(t => t.project_id === p.id);
+            const delivs = data.deliverables.filter(d => d.project_id === p.id);
             return (
               <div key={p.id} className="a1" style={{ marginBottom: 24 }}>
                 <Pl v={p.name} s={{ fontSize: 16, fontWeight: 600, color: T.ink, display: "block", marginBottom: 12 }} />
@@ -1304,8 +1657,8 @@ function ClientPortal({ session, clientId }) {
           <div className="a0" style={{ marginBottom: 20 }}>
             <Pl v="Fichiers partagés" s={{ fontSize: 24, fontWeight: 600, color: T.ink }} />
           </div>
-          {files.map(f => (
-            <Card key={f.id} style={{ padding: "14px", marginBottom: 10, display: "flex", gap: 12, alignItems: "center" }} className="a1">
+          {files.length === 0 ? <EmptyState icon="📎" title="Aucun fichier" sub="Aucun document partagé pour le moment." /> : files.map(f => (
+            <Card key={f.id} onClick={() => openFile(f)} style={{ padding: "14px", marginBottom: 10, display: "flex", gap: 12, alignItems: "center" }} className="a1">
               <div style={{ width: 40, height: 40, borderRadius: T.rSm, background: T.goldBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>
                 {{ document: "📄", template: "🎨", creative_asset: "✨" }[f.type] || "📄"}
               </div>
@@ -1313,7 +1666,7 @@ function ClientPortal({ session, clientId }) {
                 <div style={{ fontSize: 13, fontWeight: 500, color: T.ink }}>{f.name}</div>
                 <Mn v={`${f.size} · ${fDate(f.date)}`} s={{ fontSize: 10, color: T.muted }} />
               </div>
-              <button style={{ color: T.gold, fontSize: 18 }}>↓</button>
+              <button onClick={(event) => { event.stopPropagation(); openFile(f); }} disabled={!f.file_url} style={{ color: T.gold, fontSize: 18, opacity: f.file_url ? 1 : 0.35 }}>↓</button>
             </Card>
           ))}
         </div>
@@ -1413,7 +1766,9 @@ function LoginScreen() {
 export default function App() {
   const [session, setSession] = useState(undefined);
   const [nav, setNav] = useState("home");
-  const [data, setData] = useState(DEMO);
+  const [selectedProjectId, setSelectedProjectId] = useState(null);
+  const [selectedClientId, setSelectedClientId] = useState(null);
+  const { profile, data, loading, error, reload, actions } = useWorkspace(session);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => setSession(session || null));
@@ -1421,9 +1776,28 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  const logout = async () => { await supabase.auth.signOut(); setSession(null); };
+  useEffect(() => {
+    if (!session) {
+      setNav("home");
+      setSelectedProjectId(null);
+      setSelectedClientId(null);
+    }
+  }, [session]);
 
-  if (session === undefined) return (
+  const logout = async () => { await supabase.auth.signOut(); setSession(null); };
+  const openProject = useCallback((projectId) => {
+    if (!projectId) return;
+    setSelectedProjectId(projectId);
+    setNav("projects");
+  }, []);
+  const openClient = useCallback((clientId) => {
+    if (!clientId) return;
+    setSelectedClientId(clientId);
+    setNav("clients");
+  }, []);
+  const hasWorkspaceData = Boolean(data.clients.length || data.projects.length || data.tasks.length || data.leads.length || data.deliverables.length);
+
+  if (session === undefined || (session && loading && !hasWorkspaceData)) return (
     <>
       <style>{CSS}</style>
       <div style={{ minHeight: "100vh", background: T.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -1442,21 +1816,27 @@ export default function App() {
       <style>{CSS}</style>
       {session === null && <LoginScreen />}
       {session && (() => {
-        const role = session.user.user_metadata?.role;
-        const clientId = session.user.user_metadata?.client_id;
-        const name = session.user.user_metadata?.name || session.user.email?.split("@")[0] || "Utilisateur";
-        const color = session.user.user_metadata?.color || T.gold;
+        const role = profile?.role || session.user.user_metadata?.role || "manager";
+        const clientId = profile?.client_id || session.user.user_metadata?.client_id;
+        const name = profile?.full_name || session.user.user_metadata?.name || session.user.email?.split("@")[0] || "Utilisateur";
+        const color = data.team.find(member => member.id === session.user.id)?.color || session.user.user_metadata?.color || T.gold;
         const user = { id: session.user.id, name, role, color, email: session.user.email };
 
-        if (role === "client") return <ClientPortal session={session} clientId={clientId} />;
+        if (role === "client") return <ClientPortal session={session} clientId={clientId} data={data} />;
 
         return (
           <div style={{ maxWidth: 430, margin: "0 auto", minHeight: "100vh", background: T.bg, position: "relative" }}>
+            {error && (
+              <div style={{ position: "sticky", top: 0, zIndex: 60, padding: "12px 20px", background: T.redBg, borderBottom: `1px solid ${T.red}22`, display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: T.red }}>{error}</span>
+                <Btn label="Réessayer" sm v="danger" onClick={() => void reload()} />
+              </div>
+            )}
             <div key={nav} className="fi">
-              {nav === "home"     && <HomeScreen     data={data} user={user} setNav={setNav} setData={setData} />}
-              {nav === "pipeline" && <PipelineScreen data={data} setData={setData} />}
-              {nav === "clients"  && <ClientsScreen  data={data} setData={setData} user={user} />}
-              {nav === "projects" && <ProjectsScreen data={data} setData={setData} user={user} />}
+              {nav === "home"     && <HomeScreen     data={data} user={user} setNav={setNav} openProject={openProject} />}
+              {nav === "pipeline" && <PipelineScreen data={data} actions={actions} openClient={openClient} />}
+              {nav === "clients"  && <ClientsScreen  data={data} actions={actions} selectedClientId={selectedClientId} onClientSelected={setSelectedClientId} openProject={openProject} />}
+              {nav === "projects" && <ProjectsScreen data={data} actions={actions} selectedProjectId={selectedProjectId} onProjectSelected={setSelectedProjectId} />}
               {nav === "calendar" && <CalendarScreen data={data} />}
               {nav === "inbox"    && <InboxScreen    data={data} />}
             </div>
